@@ -13,6 +13,7 @@ from transformers.hf_argparser import HfArg
 
 IGNORE_INDEX = -100
 
+
 # ============================================================================
 # 7.1 监督微调（SFT）完整训练脚本
 # ----------------------------------------------------------------------------
@@ -113,13 +114,6 @@ class Arguments(TrainingArguments):
 #
 # 返回值：dict(input_ids=..., labels=...)，两个张量形状均为 [batch_size, max_len]
 #
-# ▍涉及的方法与参数：
-#   torch.nn.utils.rnn.pad_sequence(sequences, batch_first=True, padding_value=...)
-#     —— 把一组长度不等的张量填充成等长（取本批最长者）后堆叠；
-#        batch_first=True → 返回形状为 [batch, max_len]（batch 在最前）；
-#        padding_value     → 填充时使用的数值：
-#                            输入用 pad_token_id（模型注意力会自行忽略 pad 位置），
-#                            标签用 IGNORE_INDEX(-100)（不参与 loss 计算）。
 #
 # ▍具体示例：
 #   假设本批有 2 条样本：
@@ -134,7 +128,7 @@ class Arguments(TrainingArguments):
 # ============================================================================
 # 批次化数据，并构建序列到序列损失
 @dataclass
-class DataCollatorForSupervisedDataset():
+class DataCollatorForSupervisedDataset:
     tokenizer: PreTrainedTokenizer
 
     def __call__(self, instances):
@@ -143,6 +137,12 @@ class DataCollatorForSupervisedDataset():
         #   labels    = [样本A的labels张量,   样本B的labels张量,    ...]
         input_ids, labels = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels"))
         # 输入按最长对齐：右侧补 tokenizer.pad_token_id
+        #   torch.nn.utils.rnn.pad_sequence(sequences, batch_first=True, padding_value=...)
+        #     —— 把一组长度不等的张量填充成等长（取本批最长者）后堆叠；
+        #        batch_first=True → 返回形状为 [batch, max_len]（batch 在最前）；
+        #        padding_value     → 填充时使用的数值：
+        #                            输入用 pad_token_id（模型注意力会自行忽略 pad 位置），
+        #                            标签用 IGNORE_INDEX(-100)（不参与 loss 计算）。
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
         )
@@ -157,44 +157,23 @@ class DataCollatorForSupervisedDataset():
 # ============================================================================
 # 训练主流程：解析参数 → 加载分词器 → 加载模型 → 组装 Trainer → 训练并保存
 # ----------------------------------------------------------------------------
-# 涉及调用与参数详解：
-#   HfArgumentParser(Arguments).parse_args_into_dataclasses()
-#     —— 解析命令行参数（如 --model_name_or_path=... --dataset=...），
-#        返回一个元组，取 [0] 得到我们自定义的 Arguments 实例 args，
-#        之后所有参数（含父类 TrainingArguments 的）都从 args 上读取。
-#
-#   AutoTokenizer.from_pretrained(模型, model_max_length=..., padding_side=..., add_eos_token=...)
-#     —— 从本地路径或 HuggingFace Hub 加载分词器：
-#        model_max_length —— 设定模型最大长度（与 Arguments.model_max_length 一致）
-#        padding_side     —— 填充方向："right" = 在序列右侧补 pad token
-#        add_eos_token    —— False = 分词时不自动追加 EOS；
-#                            这样 EOS 的添加时机完全交给 SFTDataset 控制
-#                            （详见 sft_dataset.py 的 encode_src_tgt 第 2 步）
-#
-#   AutoModelForCausalLM.from_pretrained(模型, attn_implementation="flash_attention_2")
-#     —— 加载因果语言模型（GPT/Llama 这类自回归模型）：
-#        attn_implementation —— 注意力实现方式；flash_attention_2 用 FlashAttention-2
-#                               算法计算注意力，大幅降低显存占用并加速训练
-#
-#   Trainer(model=..., args=..., tokenizer=..., train_dataset=..., data_collator=...)
-#     —— HuggingFace 训练器，内部完成 batch 采样、前向/反向、梯度更新、日志等：
-#        model          —— 要训练的模型
-#        args           —— 训练超参数（Arguments 实例，含父类全部训练配置）
-#        tokenizer      —— 分词器
-#        train_dataset  —— 训练数据集（SFTDataset 实例，内部已完成分词与标签构造）
-#        data_collator  —— 批次整理器（把不等长样本 pad 成 batch，见上方类注释）
-#
-#   收尾步骤：
-#     trainer.train()               —— 启动训练（按 args 里的 epoch/batch/学习率配置）
-#     trainer.save_model(路径)      —— 保存模型权重到 output_dir/checkpoint-final
-#     trainer.save_state()          —— 保存训练状态（优化器、调度器、RNG 等，配合
-#                                      resume_from_checkpoint 可断点续训）
-# ============================================================================
+
 def train():
     # 解析命令行参数
+    #   HfArgumentParser(Arguments).parse_args_into_dataclasses()
+    #     —— 解析命令行参数（如 --model_name_or_path=... --dataset=...），
+    #        返回一个元组，取 [0] 得到我们自定义的 Arguments 实例 args，
+    #        之后所有参数（含父类 TrainingArguments 的）都从 args 上读取。
     parser = HfArgumentParser(Arguments)
     args = parser.parse_args_into_dataclasses()[0]
     # 加载分词器
+    #   AutoTokenizer.from_pretrained(模型, model_max_length=..., padding_side=..., add_eos_token=...)
+    #     —— 从本地路径或 HuggingFace Hub 加载分词器：
+    #        model_max_length —— 设定模型最大长度（与 Arguments.model_max_length 一致）
+    #        padding_side     —— 填充方向："right" = 在序列右侧补 pad token
+    #        add_eos_token    —— False = 分词时不自动追加 EOS；
+    #                            这样 EOS 的添加时机完全交给 SFTDataset 控制
+    #                            （详见 sft_dataset.py 的 encode_src_tgt 第 2 步）
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path,
         model_max_length=args.model_max_length,
@@ -202,8 +181,12 @@ def train():
         add_eos_token=False,
     )
     # 加载模型，并使用FlashAttention
+    #   AutoModelForCausalLM.from_pretrained(模型, attn_implementation="flash_attention_2")
+    #     —— 加载因果语言模型（GPT/Llama 这类自回归模型）：
+    #        attn_implementation —— 注意力实现方式；flash_attention_2 用 FlashAttention-2
+    #                               算法计算注意力，大幅降低显存占用并加速训练
     model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, attn_implementation="flash_attention_2")
-    # 初始化训练器、准备训练数据并开始训练
+
     kwargs = dict(
         model=model,
         args=args,
@@ -211,12 +194,32 @@ def train():
         train_dataset=SFTDataset(args, tokenizer),
         data_collator=DataCollatorForSupervisedDataset(tokenizer),
     )
-
+    # 初始化训练器、准备训练数据并开始训练
+    #   Trainer(model=..., args=..., tokenizer=..., train_dataset=..., data_collator=...)
+    #     —— HuggingFace 训练器，内部完成 batch 采样、前向/反向、梯度更新、日志等：
+    #        model          —— 要训练的模型
+    #        args           —— 训练超参数（Arguments 实例，含父类全部训练配置）
+    #        tokenizer      —— 分词器
+    #        train_dataset  —— 训练数据集（SFTDataset 实例，内部已完成分词与标签构造）
+    #        data_collator  —— 批次整理器（把不等长样本 pad 成 batch，见上方类注释）
     trainer = Trainer(**kwargs)
+    #     trainer.train()               —— 启动训练（按 args 里的 epoch/batch/学习率配置）
     trainer.train()
+    #     trainer.save_model(路径)      —— 保存模型权重到 output_dir/checkpoint-final
     trainer.save_model(args.output_dir + "/checkpoint-final")
+    #     trainer.save_state()          —— 保存训练状态（优化器、调度器、RNG 等，配合
+    #                                      resume_from_checkpoint 可断点续训）
     trainer.save_state()
 
-
+# 测试传参写法
+# class Test_Trainer:
+#     def __init__(self, model, args):
+#         self.model = model
+#         self.args = args
+#     def test(self):
+#         print(f"model: {self.model}, args: {self.args}")
 if __name__ == "__main__":
     train()
+    # test_dict = dict(model="Qwen", args=123)
+    # trainer = Test_Trainer(**test_dict)
+    # print(trainer.test())
