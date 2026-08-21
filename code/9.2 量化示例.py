@@ -1,43 +1,120 @@
 import torch
 import numpy as np
 
+# ============================================================================
+# 9.2 模型量化示例：仿射（非对称）量化的完整流程
+# ----------------------------------------------------------------------------
+# 什么是量化：把模型的权重/激活从 32 位浮点（float32）压缩成低比特整数
+# （如 int8），从而大幅减小模型体积、降低显存/内存占用并加速推理。
+#
+# 核心公式（仿射量化，即带 zero_point 的非对称量化）：
+#   量化：   x_q = round(x / S) - Z        （浮点 → 整数）
+#   反量化： x   = S * (x_q + Z)           （整数 → 浮点）
+#   其中：
+#     S —— scale（缩放因子）：决定"1 个整数单位代表多大的实数范围"，
+#          S = (beta - alpha) / (beta_q - alpha_q)
+#     Z —— zero_point（零点）：实数 0 映射到量化整数坐标系中的哪个整数，
+#          Z = int((alpha * beta_q - beta * alpha_q) / (beta - alpha))
+#     alpha / beta     —— 输入实数的取值范围（最小 / 最大值）
+#     alpha_q / beta_q —— 量化整数的取值范围（如 int8：-128 / 127）
+# ============================================================================
+
+# ============================================================================
+# 量化函数：浮点张量 → 低比特整数张量
+# ----------------------------------------------------------------------------
+# 参数说明：
+#   x          —— 输入浮点张量（待量化的数据，如权重或激活）
+#   scales     —— 缩放因子 S（标量），S = (beta - alpha) / (beta_q - alpha_q)
+#   zero_point —— 零点 Z（标量），实数 0 映射到的量化整数
+#   n_bits     —— 量化位宽（默认 8），决定整数取值范围 [alpha_q, beta_q]
+# 返回值：x_q_clipped —— 量化后的整数张量，取值被截断在 [alpha_q, beta_q] 内
+#
+# ▍公式与逐行含义：
+#   1) x.div(scales)         —— x / S：把实数按 S 缩放成"多少个整数单位"
+#   2) - zero_point          —— 减去零点 Z：平移对齐到量化整数坐标系
+#   3) .round()              —— 四舍五入取整（量化必然产生舍入误差）
+#   4) torch.clamp(min=alpha_q, max=beta_q)
+#                             —— 把超出整数表示范围的值截断到 [alpha_q, beta_q]，
+#                                防止溢出（int8 最大只能表示 127）
+#
+# ▍具体示例（沿用文件头部示例数据，x = -1.2136，S ≈ 0.7059，Z = -13）：
+#   x_q = round(-1.2136 / 0.7059 - (-13)) = round(-1.72 + 13) = round(11.28) = 11
+#   clamp 后仍在 [-128, 127] 内，保持不变 → 返回 11
+#
+#   （注意：alpha_q / beta_q 是脚本主程序（__main__ 块）中定义的全局变量，
+#    本函数依赖它们；脚本直接运行时可用，若被其他模块 import 则会报 NameError）
+# ============================================================================
 def quantize_func(x, scales, zero_point, n_bits=8):
-    x_q = (x.div(scales) + zero_point).round()
+    x_q = (x.div(scales) - zero_point).round()
     x_q_clipped = torch.clamp(x_q, min=alpha_q, max=beta_q)
     return x_q_clipped
 
+# ============================================================================
+# 反量化函数：低比特整数张量 → 浮点张量
+# ----------------------------------------------------------------------------
+# 参数说明：
+#   x_q        —— 量化后的整数张量（quantize_func 的输出）
+#   scales     —— 缩放因子 S（必须与量化时使用同一个 S）
+#   zero_point —— 零点 Z（必须与量化时使用同一个 Z）
+# 返回值：x —— 还原出的浮点张量（float32），是原始值的近似
+#
+# ▍公式与逐行含义：
+#   1) x_q.to(torch.int32)   —— 先把整数张量显式转为 int32，保证后续是整数运算
+#   2) x_q + zero_point      —— 加上零点 Z，回到"整数单位"坐标系
+#   3) scales * (...)        —— 乘以 S，把整数单位换算回实数刻度
+#   4) .to(torch.float32)    —— 转回 float32，得到近似的原始浮点值
+#
+# ▍具体示例（沿用上述数据，x_q = 11，S ≈ 0.7059，Z = -13）：
+#   x = 0.7059 * (11 + (-13)) = 0.7059 * (-2) = -1.4118
+#   （与量化前的 -1.2136 存在差异：反量化只能得到近似值，无法完全还原，
+#    差异即量化误差）
+# ============================================================================
 def dequantize_func(x_q, scales, zero_point):
     x_q = x_q.to(torch.int32)
-    x = scales * (x_q - zero_point)
+    x = scales * (x_q + zero_point)
     x = x.to(torch.float32)
     return x
 if __name__ == "__main__":
-    # 输入配置
-    random_seed = 0
+    # ── 1. 输入配置 ──────────────────────────────────────────────────────
+    random_seed = 0                # 随机种子：固定后每次运行生成的随机数相同，结果可复现
     np.random.seed(random_seed)
-    m = 2
-    p = 3
-    alpha = -100.0 # 输入最小值为-100
-    beta = 80.0 # 输入的最大值为80
-    X = np.random.uniform(low=alpha, high=beta,
-                              size=(m, p)).astype(np.float32)
-    float_x = torch.from_numpy(X)
-    # 量化参数配置
-    num_bits = 8
-    alpha_q = -2**(num_bits - 1)
-    beta_q = 2**(num_bits - 1) - 1
-    # 计算scales和zero_point
+    m = 2                          # 输入矩阵的行数
+    p = 3                          # 输入矩阵的列数
+    alpha = -100.0                 # 输入最小值：量化的实数下界（用于计算 S 和 Z）
+    beta = 80.0                    # 输入最大值：量化的实数上界
+    X = np.random.uniform(low=alpha, high=beta,       # 在 [alpha, beta] 内均匀随机采样
+                          size=(m, p)).astype(np.float32)   # 生成 2×3 的 float32 矩阵
+    float_x = torch.from_numpy(X)  # 把 numpy 数组转换为 PyTorch 张量
+
+    # ── 2. 量化参数配置 ──────────────────────────────────────────────────
+    num_bits = 8                   # 量化位宽：8 比特（int8）
+    alpha_q = -2**(num_bits - 1)            # 量化整数下界：-2^7 = -128
+    beta_q = 2**(num_bits - 1) - 1          # 量化整数上界：2^7 - 1 = 127
+
+    # ── 3. 计算 scale（S）和 zero_point（Z）──────────────────────────────
+    # S = (beta - alpha) / (beta_q - alpha_q)：
+    #   把输入实数范围 [alpha, beta] 线性映射到整数范围 [alpha_q, beta_q] 的比例。
+    #   本示例：S = 180 / 255 ≈ 0.7059，即"1 个整数单位 ≈ 0.7059 的实数"
     S = (beta - alpha) / (beta_q - alpha_q)
-    Z = int((beta * alpha_q - alpha * beta_q) / (beta - alpha))
-    # 量化过程
-    x_q_clip = quantize_func(float_x, S, Z)
+    # Z = (alpha*beta_q - beta*alpha_q) / (beta - alpha)，再取整：
+    #   保证实数 0 在量化整数坐标系中的位置准确，使 0 能被精确表示、不引入偏移。
+    #   （该公式与新版量化公式 x_q = x/S - Z 配套，代入边界值可验证：
+    #    x=alpha 时 x_q=alpha_q，x=beta 时 x_q=beta_q）
+    #   本示例：Z = int((-12700 + 10240) / 180) = int(-2460 / 180) = int(-13.67) = -13
+    Z = int((alpha * beta_q - beta * alpha_q) / (beta - alpha))
+
+    # ── 4. 量化 + 反量化验证 ─────────────────────────────────────────────
+    x_q_clip = quantize_func(float_x, S, Z)   # 浮点张量 → int8 量化（含截断）
     print(f"输入：\n{float_x}\n")
     # tensor([[ -1.2136,  28.7341,   8.4974],
     #        [ -1.9210, -23.7421,  16.2609]])
     print(f"{num_bits}比特量化后：\n{x_q_clip}")
     # tensor([[ 11.,  54.,  25.],
     #        [ 10., -21.,  36.]])
-    x_re = dequantize_func(x_q_clip,S,Z)
+    x_re = dequantize_func(x_q_clip,S,Z)      # int8 量化张量 → 浮点（还原近似值）
     print(f"反量化后：\n{x_re}")
     # tensor([[ -1.4118,  28.9412,   8.4706],
     #         [ -2.1176, -24.0000,  16.2353]])
+
+    # 测试torch.clamp
+    print(f"clamp to [-10, 10]:\n{torch.clamp(float_x, min=-10, max=10)}")
