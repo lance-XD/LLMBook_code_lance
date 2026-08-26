@@ -1,34 +1,28 @@
 import re
 from collections import Counter
 
+"""
+对照《大语言模型》中的BPE算法的代码实现
+"""
 def extract_frequencies(texts):
     """
-    将输入文本列表中的每个文本转换为带有结束标记'</w>'的单个字符序列，
-    并计算每种序列的频率。此函数使用Counter来累加每种序列的出现次数，
-    这样可以快速得到每个序列在文本中出现的总次数。
-    
-    参数:
-    texts (list of str): 输入的字符串列表，每个字符串代表一段文本。
-    
-    返回:
-    Counter: 一个计数器对象，键是字符串中的字符序列，值是该序列的频率。
+    计算字符出现的频率
+    :param texts: 原始的文本
+    :return: 词出现的频率
     """
     tokens = Counter()
-    for text in texts:
-        text = ' '.join(text) + ' </w>'  # 将每个字符转换为带空格的形式，并在末尾添加'</w>'
-        tokens.update(text.split())
+    lst = texts.split()
+    for text in lst:
+        text = " ".join(text) + " </w>"
+        tokens[text] += 1
     return tokens
+
 
 def frequency_of_pairs(frequencies):
     """
-    从给定的频率字典中计算所有相邻字符对的频率。通过遍历每个词元，
-    查找并统计所有相邻字符对的出现频率。
-
-    参数:
-    frequencies (Counter): 词元到其频率的映射字典。
-
-    返回:
-    Counter: 字符对到其频率的映射字典。
+    计算成对的频率
+    :param frequencies: 统计的词内容
+    :return: 词对
     """
     pairs = Counter()
     for token, freq in frequencies.items():
@@ -37,48 +31,63 @@ def frequency_of_pairs(frequencies):
             pairs[symbols[i], symbols[i + 1]] += freq
     return pairs
 
+
 def merge_vocab(pair, vocab):
     """
-    合并词汇表中最频繁的字符对。此函数接受一个字符对和当前的词汇表，
-    将所有包含该字符对的词元中的对应字符合并为一个单一字符，
-    并更新词汇表以反映这一变化。
-
-    参数:
-    pair (tuple): 要合并的字符对。
-    vocab (Counter): 当前的词元到频率的映射字典。
-
-    返回:
-    Counter: 更新后的词元到频率的映射字典。
+    合并词汇表中的频繁出现的字符对
+    :param pair: 字符对
+    :param vocab: 词汇表
+    :return: 新的词汇表
     """
-    bigram = re.escape(' '.join(pair))
+    # 给字符加上转义字符
+    bigram = re.escape(" ".join(pair))
     merged = ''.join(pair)
     new_vocab = Counter()
     for token in vocab:
-        new_token = token.replace(bigram, merged)
+        # 用正则表达式进行替换
+        new_token = re.sub(bigram, merged, token)
         new_vocab[new_token] = vocab[token]
     return new_vocab
 
-def encode_with_bpe(texts, num_merges):
-    """
-    使用字节对编码(BPE)算法对输入文本进行编码。此函数首先提取词元的初始频率，
-    然后迭代合并频率最高的字符对，直到达到指定的合并次数或没有可合并的对为止。
 
-    参数:
-    texts (list of str): 输入的字符串列表，每个字符串代表一段文本。
-    num_merges (int): 指定的最大合并次数。
-
-    返回:
-    Counter: 合并后的词元到频率的映射字典。
+def encode_with_bpe(texts, limit):
     """
+    对文本进行编码
+    :param texts: 源文本
+    :param limit: 词元上限
+    :return: 生成的词元表
+    """
+    # 分词表
     vocab = extract_frequencies(texts)
-    for _ in range(num_merges):
+    # 词汇表
+    tokens = Counter()
+    for token, freq in vocab.items():
+        symbols = token.split()
+        # 将单个词的内容整体分割成单个字符更新
+        tokens.update(symbols)
+
+    # 已经达到词汇表上限直接返回
+    if len(tokens) > limit:
+        return tokens
+    # 计算需要循环的次数
+    cnt = limit - len(tokens)
+    for _ in range(cnt):
         pairs = frequency_of_pairs(vocab)
+        # print(pairs)
         if not pairs:
             break
-        most_frequent = pairs.most_common(1)[0][0]
-        vocab = merge_vocab(most_frequent, vocab)
-    return vocab
+        # 取出频次最高的分词
+        most_frequent = pairs.most_common(1)
+        # 更新词汇表
+        tokens["".join(most_frequent[0][0])] = most_frequent[0][1]
+        vocab = merge_vocab(most_frequent[0][0], vocab)
+    return tokens
 
-# 示例用法
-num_merges = 1000
-bpe_vocab = encode_with_bpe(data, num_merges)
+
+# data = "this is my destiny!"
+data = ("当遇到“未登录词”时，BPE不会报错，它会将这个词拆分成已知的最小子词单元（甚至退化到单个字符）。"
+        "因为字节级BPE最终可以拆成单个字节（0~255），所以任何文本都能被切分，绝对没有未知词。")
+# 测试合并之后，不超过15个分词的情况
+token_limit = 80
+bpe_vocab = encode_with_bpe(data, token_limit)
+print(f"bpe处理后的词汇表为：{bpe_vocab}")
