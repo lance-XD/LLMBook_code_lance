@@ -17,13 +17,6 @@ utils/evaluator/LangIdentifier.py —— 语言识别评估器（fastText 封装
     model.predict(text)       —— 预测文本语言，返回 (labels, scores)：
                                    labels 形如 ('__label__en',)，scores 形如 (0.83,)；
                                    默认 k=1 只返回置信度最高的 1 种语言
-
-【运行方式】
-本项目 utils 目录没有 __init__.py，属于 PEP 420 命名空间包：
-  - 在项目根目录执行：python -m utils.evaluator.LangIdentifier   ← 推荐
-  - 或把项目根目录加入 PYTHONPATH 后执行 python utils/evaluator/LangIdentifier.py
-  - 直接 python utils/evaluator/LangIdentifier.py 会因找不到 utils 包而报错
-    （运行脚本时 sys.path[0] 是脚本所在目录 utils/evaluator/，而不是项目根目录）
 """
 import os
 
@@ -33,7 +26,7 @@ from utils.evaluator.evaluator_base import EvaluatorBase
 import fasttext
 
 class LangIdentifier(EvaluatorBase):
-    def __init__(self, model_path: str = "utils/models/fasttext/lid.176.bin"):
+    def __init__(self, model_path: str = "../models/fasttext/lid.176.bin"):
         # model_path —— fastText 语言识别模型文件（lid.176.bin）路径；
         #               传空字符串则不加载模型（self.model = None，供无模型场景使用）
         # 下面两个属性来自父类 EvaluatorBase.__init__（统一接口约定），这里重新赋值
@@ -47,6 +40,9 @@ class LangIdentifier(EvaluatorBase):
             # fasttext.load_model(path) —— 加载 fastText 预训练模型（.bin 格式）
             #   lid.176.bin：官方语言识别模型，覆盖 176 种语言，
             #   文件约百 MB（位于仓库 utils/models/fasttext/ 下），加载耗时数秒
+            self.model = fasttext.load_model(model_path)
+
+        else:
             # 获取当前脚本 LangIdentifier.py 所在的绝对目录
             # 即：D:/Pycharm/Projects/LLMBook_code_lance/utils/evaluator/
             script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -54,9 +50,8 @@ class LangIdentifier(EvaluatorBase):
             # 从 evaluator 目录回到上一级 utils，再进入 models/fasttext
             # 构建出完整准确的绝对路径
             abs_model_path = os.path.normpath(os.path.join(script_dir, "..", "models", "fasttext", "lid.176.bin"))
+
             self.model = fasttext.load_model(abs_model_path)
-        else:
-            self.model = None
 
     def _regularize_text(self, text: str) -> str:
         # 文本预处理：把多行文本压成一行
@@ -92,7 +87,7 @@ class LangIdentifier(EvaluatorBase):
 if __name__ == '__main__':
     # 加载语言识别模型（lid.176.bin 已随仓库提供）
     langidentifier = LangIdentifier(
-        model_path="utils/models/fasttext/lid.176.bin"
+        model_path="../models/fasttext/lid.176.bin"
     )
     # 6 条测试文本：
     #   1、2、5 号 —— 正常英文/中文；
